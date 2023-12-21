@@ -1,6 +1,13 @@
 package utils
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"strings"
+)
+
+func ReplaceModelName(model string) string {
+	return strings.Replace(model, "/", "-", -1)
+}
 
 func ContainsFinalizer(finalizers []string, finalizer string) bool {
 	for _, s := range finalizers {

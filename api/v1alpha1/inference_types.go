@@ -22,43 +22,63 @@ import (
 )
 
 const (
-	InferenceFinalizer = "finalizer.inference.ai.manager.io"
-	LabelModelName     = "ai.manager.io/model-name"
-	LabelFramework     = "ai.manager.io/framework"
-	LabelApp           = "app"
-	LabelGPU           = "nvidia.com/gpu.present"
+	InferenceFinalizer                        = "finalizer.inference.ai.manager.io"
+	LabelModelName                            = "ai.manager.io/model-name"
+	LabelFramework                            = "ai.manager.io/framework"
+	LabelApp                                  = "app"
+	LabelGPU                                  = "nvidia.com/gpu.present"
+	DeployedInferStatus  InferComponentStatus = "deployed"
+	FailedInferStatus    InferComponentStatus = "failed"
+	LocalModelDir                             = "/models"
+	InferContainerPort   int32                = 8000
+	InferServicePort     int32                = 8000
+	DefaultModelImageTag string               = "rebase"
 )
+
+type InferComponentStatus string
 
 // InferenceSpec defines the desired state of Inference
 type InferenceSpec struct {
-	Model string `json:"model,omitempty"`
+	// +required
+	Model string `json:"model"`
+	// +required
+	Framework string `json:"framework"`
 
-	Framework string `json:"framework,omitempty"`
+	// Default: 1
+	// +kubebuilder:default:=1
+	Replicas *int32 `json:"replicas,omitempty"`
 
-	Replicas int32 `json:"int,omitempty"`
-
+	// +optional
 	PodMetadata *EmbeddedObjectMetadata `json:"podMetadata,omitempty"`
 
-	Image string `json:"image,omitempty"`
+	// +optional
+	Image *string `json:"image,omitempty"`
 
+	// +kubebuilder:validation:Enum="";Always;Never;IfNotPresent
 	ImagePullPolicy v1.PullPolicy `json:"imagePullPolicy,omitempty"`
 
 	ImagePullSecrets []v1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
-	// Default: "web"
-	// +kubebuilder:default:="web"
+	// +optional
+	// +kubebuilder:default:="inference"
 	PortName string `json:"portName,omitempty"`
+
+	// +optional
+	NodePort *int32 `json:"nodePort,omitempty"`
 
 	// Defines the resources requests
 	Resources v1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Defines the Pods' affinity scheduling rules if specified.
+	// +optional
 	Affinity *v1.Affinity `json:"affinity,omitempty"`
 
 	// Defines the Pods' tolerations if specified.
+	// +optional
 	Tolerations []v1.Toleration `json:"tolerations,omitempty"`
 
 	// Defines on which Nodes the Pods are scheduled.
+	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
@@ -91,6 +111,15 @@ type EmbeddedObjectMetadata struct {
 
 // InferenceStatus defines the observed state of Inference
 type InferenceStatus struct {
+	Hash string `json:"hash,omitempty"`
+
+	Status InferComponentStatus `json:"status,omitempty"`
+	// lastTransitionTime is the time of the last update to the current status property.
+	// +required
+	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
+	// Human-readable message indicating details for the last update.
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 //+kubebuilder:object:root=true

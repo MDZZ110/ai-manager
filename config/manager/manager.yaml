@@ -56,6 +56,10 @@ spec:
       #             operator: In
       #             values:
       #               - linux
+      volumes:
+        - name: manager-config
+          configMap:
+            name: config
       securityContext:
         runAsNonRoot: true
         # TODO(user): For common cases that do not require escalating privileges
@@ -70,8 +74,12 @@ spec:
         - /manager
         args:
         - --leader-elect
-        image: controller:latest
+        image: kubesphere/ai-manager:v0.2.0
         name: manager
+        volumeMounts:
+          - mountPath: /data/config/
+            readOnly: true
+            name: manager-config
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

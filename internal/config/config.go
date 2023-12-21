@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	defaultConfigurationName = "inference"
-	defaultConfigurationPath = "/etc/inference"
+	defaultConfigurationName = "ai-manager"
+	defaultConfigurationPath = "/data/config"
 )
 
 var (
@@ -62,7 +62,7 @@ func defaultConfig() *config {
 	viper.AddConfigPath(".")
 
 	// Load from Environment variables
-	viper.SetEnvPrefix("inference")
+	viper.SetEnvPrefix("ai-manager")
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 

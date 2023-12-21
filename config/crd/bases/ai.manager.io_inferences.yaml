@@ -869,6 +869,11 @@ spec:
               imagePullPolicy:
                 description: PullPolicy describes a policy for if/when to pull a container
                   image
+                enum:
+                - ""
+                - Always
+                - Never
+                - IfNotPresent
                 type: string
               imagePullSecrets:
                 items:
@@ -882,9 +887,6 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
-              int:
-                format: int32
-                type: integer
               model:
                 type: string
               nodeSelector:
@@ -922,9 +924,13 @@ spec:
                     type: string
                 type: object
               portName:
-                default: web
-                description: 'Default: "web"'
+                default: inference
                 type: string
+              replicas:
+                default: 1
+                description: 'Default: 1'
+                format: int32
+                type: integer
               resources:
                 description: Defines the resources requests
                 properties:
@@ -1013,9 +1019,17 @@ spec:
                       type: string
                   type: object
                 type: array
+            required:
+            - framework
+            - model
             type: object
           status:
             description: InferenceStatus defines the observed state of Inference
+            properties:
+              deploymentStatus:
+                type: string
+              serviceStatus:
+                type: string
             type: object
         type: object
     served: true

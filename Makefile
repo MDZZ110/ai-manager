@@ -1,6 +1,10 @@
-
+REPO ?= kubesphere
+TAG ?= latest
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+MANAGER_IMG ?= $(REPO)/ai-manager:$(TAG)
+MANAGER_IMG_DEBUG ?= $(REPO)/ai-manager:$(TAG)-debug
+
+MODEL_JOB_IMG ?= $(REPO)/ai-model-job:$(TAG)
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.28.0
 
@@ -66,24 +70,36 @@ test: manifests generate fmt vet envtest ## Run tests.
 
 ##@ Build
 
-.PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+.PHONY: build-manager
+build-manager: manifests generate fmt vet ## Build manager binary.
+	go build -o bin/manager cmd/manager/manager.go
 
-.PHONY: run
-run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+.PHONY: run-manager
+run-manager: manifests generate fmt vet ## Run a controller from your host.
+	go run ./cmd/manager/manager.go
+
+.PHONY: build-model-job
+build-model-job: manifests generate fmt vet ## Build manager binary.
+	go build -o bin/model-job cmd/model-job/model-job.go
+
+.PHONY: run-model-job
+run-model-job: manifests generate fmt vet ## Run a controller from your host.
+	go run ./cmd/model-job/model-job.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-.PHONY: docker-build
-docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+.PHONY: docker-build-manager
+docker-build-manager: ## Build docker image with the manager.
+	$(CONTAINER_TOOL) build -f build/manager/Dockerfile -t ${MANAGER_IMG} .
 
-.PHONY: docker-push
+.PHONY: docker-build-manager-debug
+docker-build-manager-debug:
+	$(CONTAINER_TOOL) build -f build/manager/Dockerfile.debug -t ${MANAGER_IMG_DEBUG} .
+
+.PHONY: docker-push-manager
 docker-push: ## Push docker image with the manager.
-	$(CONTAINER_TOOL) push ${IMG}
+	$(CONTAINER_TOOL) push ${MANAGER_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -92,10 +108,20 @@ docker-push: ## Push docker image with the manager.
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
-.PHONY: docker-buildx
-docker-buildx: ## Build and push docker image for the manager for cross-platform support
+.PHONY: docker-buildx-manager
+docker-buildx-manager: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' build/manager/Dockerfile > Dockerfile.cross
+	- $(CONTAINER_TOOL) buildx create --name project-v3-builder
+	$(CONTAINER_TOOL) buildx use project-v3-builder
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx rm project-v3-builder
+	rm Dockerfile.cross
+
+.PHONY: docker-buildx-model-job
+docker-buildx-model-job: ## Build and push docker image for the manager for cross-platform support
+	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' build/model-job/Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name project-v3-builder
 	$(CONTAINER_TOOL) buildx use project-v3-builder
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config
+data:
+  ai-manager.yaml: |
+    registry: harbor.dev.thingsdao.com
+    credSecretName: ai-manager-deploy

@@ -1,0 +1,31 @@
+# permissions for end users to edit assembledmodels.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: assembledmodel-editor-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: ai-manager
+    app.kubernetes.io/part-of: ai-manager
+    app.kubernetes.io/managed-by: kustomize
+  name: assembledmodel-editor-role
+rules:
+- apiGroups:
+  - ai.manager.io
+  resources:
+  - assembledmodels
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ai.manager.io
+  resources:
+  - assembledmodels/status
+  verbs:
+  - get

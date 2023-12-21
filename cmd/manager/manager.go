@@ -18,8 +18,11 @@ package main
 
 import (
 	"flag"
-	"k8s.io/klog/v2"
 	"os"
+
+	"k8s.io/klog/v2"
+
+	"github.com/MDZZ110/ai-manager/internal/config"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -67,6 +70,12 @@ func main() {
 
 	ctrl.SetLogger(klog.NewKlogr())
 
+	managerConfig, err := config.TryLoadFromDisk()
+	if err != nil {
+		setupLog.Error(err, "load config failed")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
@@ -93,6 +102,7 @@ func main() {
 	if err = (&controller.EndpointReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Config: managerConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Endpoint")
 		os.Exit(1)
@@ -100,8 +110,16 @@ func main() {
 	if err = (&controller.InferenceReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Config: managerConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Inference")
+		os.Exit(1)
+	}
+	if err = (&controller.AssembledModelReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AssembledModel")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder

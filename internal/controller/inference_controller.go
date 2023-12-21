@@ -19,8 +19,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	aimanageriov1alpha1 "github.com/MDZZ110/ai-manager/api/v1alpha1"
+	"github.com/MDZZ110/ai-manager/internal/config"
 	"github.com/MDZZ110/ai-manager/internal/utils"
 	"github.com/go-logr/logr"
+	"github.com/mitchellh/hashstructure"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,22 +37,26 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	aimanageriov1alpha1 "github.com/MDZZ110/ai-manager/api/v1alpha1"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // InferenceReconciler reconciles a Inference object
 type InferenceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	Config *config.Config
 }
 
 //+kubebuilder:rbac:groups=ai.manager.io,resources=inferences,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=ai.manager.io,resources=inferences/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=ai.manager.io,resources=inferences/finalizers,verbs=update
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 
 func (i *InferenceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var err error
 	logger := log.FromContext(ctx)
 	inference := &aimanageriov1alpha1.Inference{}
 
@@ -57,6 +64,7 @@ func (i *InferenceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	inference = i.SetDefaultValue(inference)
 	if inference.ObjectMeta.DeletionTimestamp.IsZero() {
 		if !utils.ContainsFinalizer(inference.GetFinalizers(), aimanageriov1alpha1.InferenceFinalizer) {
 			i.SetFinalizers(inference)
@@ -74,31 +82,107 @@ func (i *InferenceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 
 			i.RemoveFinalizers(inference)
-			if err := i.Update(ctx, inference); err != nil {
-				return ctrl.Result{}, err
+			err = i.Update(ctx, inference)
+			if err != nil {
+				logger.Error(err, "update inference failed", "inferName", inference.Name)
 			}
 
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, err
 		}
 	}
 
 	matchLabels := map[string]string{
 		aimanageriov1alpha1.LabelApp:       inference.Name,
-		aimanageriov1alpha1.LabelModelName: inference.Spec.Model,
+		aimanageriov1alpha1.LabelModelName: utils.ReplaceModelName(inference.Spec.Model),
 		aimanageriov1alpha1.LabelFramework: inference.Spec.Framework,
 	}
 
-	desiredDeployment := getDesiredWorkerDeployment(inference, matchLabels)
-	desiredDeployment.SetOwnerReferences(GetOwnerReference(inference))
-	err := i.CreateOrUpdateDeployment(ctx, desiredDeployment)
+	hashInt64, err := hashstructure.Hash(struct {
+		Name            string
+		InferGeneration int64
+		Config          config.Config
+	}{
+		Name:            inference.Name,
+		InferGeneration: inference.Generation,
+		Config:          *i.Config,
+	}, nil)
+	if err != nil {
+		logger.Error(err, "failed to calculate combined inference hash", "inferName", inference.Name)
+		return ctrl.Result{}, err
+	}
+
+	hash := fmt.Sprintf("%d", hashInt64)
+	if inference.Status.Hash == hash {
+		logger.V(0).Info("combinedHash not updated, skipping updating inference component",
+			"oldHash", inference.Status.Hash,
+			"newHash", hash,
+			"inferName", inference.Name)
+		return ctrl.Result{}, nil
+	}
+
+	defer func() {
+		inference.Status.Hash = hash
+		inference.Status.LastTransitionTime = metav1.Time{
+			Time: time.Now().UTC(),
+		}
+
+		if err != nil {
+			inference.Status.Message = err.Error()
+			inference.Status.Status = aimanageriov1alpha1.DeployedInferStatus
+		} else {
+			inference.Status.Status = aimanageriov1alpha1.FailedInferStatus
+		}
+
+		err = i.UpdateStatus(ctx, inference)
+		if err != nil {
+			logger.Error(err, "update inference status failed", "inferName", inference.Name)
+		}
+	}()
+
+	desiredDeployment := i.getDesiredWorkerDeployment(inference, matchLabels)
+	err = ctrl.SetControllerReference(inference, desiredDeployment, i.Scheme)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	err = i.CreateOrUpdateDeployment(ctx, desiredDeployment)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	desiredService := getDesiredService(inference, matchLabels)
-	desiredService.SetOwnerReferences(GetOwnerReference(inference))
+	err = ctrl.SetControllerReference(inference, desiredService, i.Scheme)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	err = i.CreateOrUpdateService(ctx, desiredService)
+	if err != nil {
+		logger.Error(err, "create or update service failed", "inferName", inference.Name)
+	}
 	return ctrl.Result{}, err
+}
+
+func (i *InferenceReconciler) SetDefaultValue(inference *aimanageriov1alpha1.Inference) *aimanageriov1alpha1.Inference {
+	if len(inference.Spec.ImagePullSecrets) == 0 {
+		credSecretRef := corev1.LocalObjectReference{i.Config.CredSecretName}
+		inference.Spec.ImagePullSecrets = append(inference.Spec.ImagePullSecrets, credSecretRef)
+	}
+
+	return inference
+}
+
+func (i *InferenceReconciler) UpdateStatus(ctx context.Context, inference *aimanageriov1alpha1.Inference) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		currInference := &aimanageriov1alpha1.Inference{}
+		err := i.Get(ctx, client.ObjectKeyFromObject(inference), currInference)
+		if err != nil {
+			return err
+		}
+
+		currInference.Status = currInference.Status
+		return i.Status().Update(ctx, currInference)
+	})
 }
 
 func (i *InferenceReconciler) CreateOrUpdateDeployment(ctx context.Context, desired *appsv1.Deployment) error {
@@ -175,41 +259,49 @@ func mergeMetadata(new, old *metav1.ObjectMeta) {
 	new.Annotations = labels.Merge(old.Annotations, new.Annotations)
 }
 
-func GetOwnerReference(inference *aimanageriov1alpha1.Inference) []metav1.OwnerReference {
-	isController := true
-	controllerRef := []metav1.OwnerReference{
-		{
-			APIVersion: inference.APIVersion,
-			Kind:       inference.Kind,
-			Name:       inference.Name,
-			UID:        inference.UID,
-			Controller: &isController,
-		},
+func (i *InferenceReconciler) getPodMetadata(inference *aimanageriov1alpha1.Inference, matchLabels map[string]string) (map[string]string, map[string]string) {
+	podAnnotations := make(map[string]string)
+	podLabels := make(map[string]string)
+	for k, v := range matchLabels {
+		podLabels[k] = v
 	}
 
-	return utils.MergeOwnerReferences(inference.GetOwnerReferences(), controllerRef)
+	if inference.Spec.PodMetadata != nil {
+		for k, v := range inference.Spec.PodMetadata.Labels {
+			podLabels[k] = v
+		}
+
+		for k, v := range inference.Spec.PodMetadata.Annotations {
+			podAnnotations[k] = v
+		}
+	}
+
+	return podAnnotations, podLabels
 }
 
-func getDesiredWorkerDeployment(inference *aimanageriov1alpha1.Inference, matchLabels map[string]string) (workerDeployment *appsv1.Deployment) {
-	container := createContainer(inference)
+func (i *InferenceReconciler) getDesiredWorkerDeployment(inference *aimanageriov1alpha1.Inference, matchLabels map[string]string) (workerDeployment *appsv1.Deployment) {
+	container := i.createContainer(inference)
+	podAnnotations, podLabels := i.getPodMetadata(inference, matchLabels)
+
 	workerDeployment = &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Deployment",
 			APIVersion: "apps/v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-%s-%s", inference.Name, inference.Spec.Model, inference.Spec.Framework),
+			Name:      fmt.Sprintf("%s-%s-%s", inference.Name, utils.ReplaceModelName(inference.Spec.Model), inference.Spec.Framework),
 			Namespace: inference.Namespace,
 			Labels:    matchLabels,
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: &inference.Spec.Replicas,
+			Replicas: inference.Spec.Replicas,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: matchLabels,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: matchLabels,
+					Labels:      podLabels,
+					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
 					SecurityContext: &corev1.PodSecurityContext{},
@@ -225,12 +317,25 @@ func getDesiredWorkerDeployment(inference *aimanageriov1alpha1.Inference, matchL
 	return
 }
 
-func createContainer(inference *aimanageriov1alpha1.Inference) (container corev1.Container) {
+func (i *InferenceReconciler) getModelImage(inference *aimanageriov1alpha1.Inference) (modelImage string) {
+	if inference.Spec.Image != nil {
+		return *inference.Spec.Image
+	}
+
+	modelName := utils.ReplaceModelName(inference.Spec.Model)
+	if strings.HasSuffix(i.Config.Registry, "/") {
+		return fmt.Sprintf("%s%s-%s:%s", i.Config.Registry, modelName, inference.Spec.Framework, aimanageriov1alpha1.DefaultModelImageTag)
+	}
+
+	return fmt.Sprintf("%s/%s-%s:%s", i.Config.Registry, modelName, inference.Spec.Framework, aimanageriov1alpha1.DefaultModelImageTag)
+}
+
+func (i *InferenceReconciler) createContainer(inference *aimanageriov1alpha1.Inference) (container corev1.Container) {
 	container = corev1.Container{
 		Name:            inference.Name,
-		Image:           inference.Spec.Image,
+		Image:           i.getModelImage(inference),
 		ImagePullPolicy: inference.Spec.ImagePullPolicy,
-		Ports:           createPrometheusPorts(),
+		Ports:           createInferServicePorts(inference),
 	}
 
 	container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
@@ -245,67 +350,64 @@ func createContainer(inference *aimanageriov1alpha1.Inference) (container corev1
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
 		},
 		AllowPrivilegeEscalation: pointer.Bool(false),
-		RunAsNonRoot:             pointer.Bool(true),
 	}
-	// TODO Hugging face Model container args
-	//container.Args = []string{"-v=" + verbosity}
 
-	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/healthz",
-				Port: intstr.IntOrString{
-					Type:   intstr.Int,
-					IntVal: 8443,
-				},
-				Scheme: corev1.URISchemeHTTPS,
-			},
-		},
-		InitialDelaySeconds: 2,
-		PeriodSeconds:       5,
-		FailureThreshold:    3,
-		SuccessThreshold:    1,
-		TimeoutSeconds:      1,
+	container.Command = []string{
+		"python",
+		"-m",
+		"vllm.entrypoints.openai.api_server",
+		"--host",
+		"0.0.0.0",
+		"--port",
+		strconv.Itoa(int(aimanageriov1alpha1.InferContainerPort)),
+		"--model",
+		fmt.Sprintf("%s/%s", aimanageriov1alpha1.LocalModelDir, inference.Spec.Model),
 	}
 
 	container.Resources = inference.Spec.Resources
 	return
 }
 
-func createPrometheusPorts() []corev1.ContainerPort {
+func createInferServicePorts(inference *aimanageriov1alpha1.Inference) []corev1.ContainerPort {
 	return []corev1.ContainerPort{
 		{
-			Name:          "infr-service",
-			ContainerPort: 8082,
-			Protocol:      "TCP",
+			Name:          inference.Spec.PortName,
+			ContainerPort: aimanageriov1alpha1.InferContainerPort,
+			Protocol:      corev1.ProtocolTCP,
 		},
 	}
 }
 
 func getDesiredService(inference *aimanageriov1alpha1.Inference, labels map[string]string) (svc *corev1.Service) {
-	return &corev1.Service{
+	servicePort := corev1.ServicePort{
+		Name:       inference.Spec.PortName,
+		Port:       aimanageriov1alpha1.InferServicePort,
+		TargetPort: intstr.FromString(inference.Spec.PortName),
+		Protocol:   corev1.ProtocolTCP,
+	}
+
+	svc = &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
 			Kind:       "Service",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: inference.Name,
+			Name:      inference.Name,
+			Namespace: inference.Namespace,
 			Labels: map[string]string{
 				aimanageriov1alpha1.LabelApp: inference.Name,
 			},
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: labels,
-			Ports: []corev1.ServicePort{
-				{
-					Port: 8084,
-					TargetPort: intstr.IntOrString{
-						Type:   intstr.Int,
-						IntVal: 8084,
-					},
-					Protocol: corev1.ProtocolTCP,
-				},
-			},
 		},
 	}
+
+	if inference.Spec.NodePort != nil {
+		servicePort.NodePort = *inference.Spec.NodePort
+		svc.Spec.Type = corev1.ServiceTypeNodePort
+		svc.Spec.Ports = []corev1.ServicePort{servicePort}
+	}
+
+	return
 }

@@ -7,6 +7,17 @@ metadata:
     app.kubernetes.io/part-of: ai-manager
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/created-by: ai-manager
-  name: endpoint-sample
+  name: opt125m-model
 spec:
-  # TODO(user): Add fields here
+  inferSpec:
+    model: "facebook/opt-125m"
+    framework: "vllm"
+    image: "facebook-opt125m-vllm:rebase"
+  webSpec:
+    openAiKey: sk-xxxx
+    baseURL: "http://opt125m-model.ai-manager-system.svc:8000"
+    password: "123456"
+    image: yidadaa/chatgpt-next-web:latest
+    nodePort: 30884
+    
+

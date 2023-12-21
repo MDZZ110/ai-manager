@@ -1,0 +1,27 @@
+# permissions for end users to view assembledmodels.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: assembledmodel-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: ai-manager
+    app.kubernetes.io/part-of: ai-manager
+    app.kubernetes.io/managed-by: kustomize
+  name: assembledmodel-viewer-role
+rules:
+- apiGroups:
+  - ai.manager.io
+  resources:
+  - assembledmodels
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ai.manager.io
+  resources:
+  - assembledmodels/status
+  verbs:
+  - get
