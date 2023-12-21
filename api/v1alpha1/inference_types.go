@@ -22,12 +22,19 @@ import (
 )
 
 const (
-	InferenceFinalizer = "finalizer.inference.ai.manager.io"
-	LabelModelName     = "ai.manager.io/model-name"
-	LabelFramework     = "ai.manager.io/framework"
-	LabelApp           = "app"
-	LabelGPU           = "nvidia.com/gpu.present"
+	InferenceFinalizer                        = "finalizer.inference.ai.manager.io"
+	LabelModelName                            = "ai.manager.io/model-name"
+	LabelFramework                            = "ai.manager.io/framework"
+	LabelApp                                  = "app"
+	LabelGPU                                  = "nvidia.com/gpu.present"
+	DeployedInferStatus  InferComponentStatus = "deployed"
+	FailedInferStatus    InferComponentStatus = "failed"
+	LocalModelDir                             = "/models"
+	InferContainerPort   int32                = 8000
+	DefaultModelImageTag string               = "rebase"
 )
+
+type InferComponentStatus string
 
 // InferenceSpec defines the desired state of Inference
 type InferenceSpec struct {
@@ -48,6 +55,8 @@ type InferenceSpec struct {
 	// Default: "web"
 	// +kubebuilder:default:="web"
 	PortName string `json:"portName,omitempty"`
+
+	ServicePort int32 `json:"servicePort,omitempty"`
 
 	// Defines the resources requests
 	Resources v1.ResourceRequirements `json:"resources,omitempty"`
@@ -91,6 +100,8 @@ type EmbeddedObjectMetadata struct {
 
 // InferenceStatus defines the observed state of Inference
 type InferenceStatus struct {
+	DeploymentStatus InferComponentStatus `json:"deploymentStatus,omitempty"`
+	ServiceStatus    InferComponentStatus `json:"serviceStatus,omitempty"`
 }
 
 //+kubebuilder:object:root=true

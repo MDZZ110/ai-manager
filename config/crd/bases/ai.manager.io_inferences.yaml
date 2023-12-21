@@ -1016,6 +1016,11 @@ spec:
             type: object
           status:
             description: InferenceStatus defines the observed state of Inference
+            properties:
+              deploymentStatus:
+                type: string
+              serviceStatus:
+                type: string
             type: object
         type: object
     served: true

@@ -17,29 +17,69 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
-	EndpointFinalizer = "finalizer.endpoint.ai.manager.io"
+	EndpointFinalizer                              = "finalizer.endpoint.ai.manager.io"
+	DeployedEndpointStatus EndpointComponentStatus = "deployed"
+	FailedEndpointStatus   EndpointComponentStatus = "failed"
+	LabelChatWebUI                                 = "chat-next-web"
+	ChatWebName                                    = "chatNextWeb"
+	DefaultChatWebImage                            = "yidadaa/chatgpt-next-web"
+	DefaultChatWebImageTag                         = "latest"
+	WebContainerPort       int32                   = 3000
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+type EndpointComponentStatus string
 
 // EndpointSpec defines the desired state of Endpoint
 type EndpointSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// Foo is an example field of Endpoint. Edit endpoint_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	InferSpec *InferenceSpec   `json:"inferSpec,omitempty"`
+	WebSpec   *EndpointWebSpec `json:"webSpec,omitempty"`
 }
 
 // EndpointStatus defines the observed state of Endpoint
 type EndpointStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	WebStatus   EndpointComponentStatus `json:"webStatus,omitempty"`
+	InferStatus EndpointComponentStatus `json:"InferStatus,omitempty"`
+}
+
+type EndpointWebSpec struct {
+	OpenAiKey string `json:"openAiKey,omitempty"`
+
+	BaseURL string `json:"baseURL,omitempty"`
+
+	Password string `json:"password,omitempty"`
+
+	Replicas int32 `json:"int,omitempty"`
+
+	PodMetadata *EmbeddedObjectMetadata `json:"podMetadata,omitempty"`
+
+	Image string `json:"image,omitempty"`
+
+	ImagePullPolicy v1.PullPolicy `json:"imagePullPolicy,omitempty"`
+
+	ImagePullSecrets []v1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// Default: "chatweb"
+	// +kubebuilder:default:="chatweb"
+	PortName string `json:"portName,omitempty"`
+
+	ServicePort int32 `json:"servicePort,omitempty"`
+
+	// Defines the resources requests
+	Resources v1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Defines the Pods' affinity scheduling rules if specified.
+	Affinity *v1.Affinity `json:"affinity,omitempty"`
+
+	// Defines the Pods' tolerations if specified.
+	Tolerations []v1.Toleration `json:"tolerations,omitempty"`
+
+	// Defines on which Nodes the Pods are scheduled.
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
 //+kubebuilder:object:root=true

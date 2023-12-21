@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	aimanageriov1alpha1 "github.com/MDZZ110/ai-manager/api/v1alpha1"
+	"github.com/MDZZ110/ai-manager/internal/config"
 	"github.com/MDZZ110/ai-manager/internal/utils"
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,14 +36,15 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	aimanageriov1alpha1 "github.com/MDZZ110/ai-manager/api/v1alpha1"
+	"strconv"
+	"strings"
 )
 
 // InferenceReconciler reconciles a Inference object
 type InferenceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	Config *config.Config
 }
 
 //+kubebuilder:rbac:groups=ai.manager.io,resources=inferences,verbs=get;list;watch;create;update;patch;delete
@@ -88,16 +91,19 @@ func (i *InferenceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		aimanageriov1alpha1.LabelFramework: inference.Spec.Framework,
 	}
 
-	desiredDeployment := getDesiredWorkerDeployment(inference, matchLabels)
-	desiredDeployment.SetOwnerReferences(GetOwnerReference(inference))
+	desiredDeployment := i.getDesiredWorkerDeployment(inference, matchLabels)
+	desiredDeployment.SetOwnerReferences(GetInferOwnerReference(inference))
 	err := i.CreateOrUpdateDeployment(ctx, desiredDeployment)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	desiredService := getDesiredService(inference, matchLabels)
-	desiredService.SetOwnerReferences(GetOwnerReference(inference))
+	desiredService.SetOwnerReferences(GetInferOwnerReference(inference))
 	err = i.CreateOrUpdateService(ctx, desiredService)
+	if err != nil {
+		logger.Error(err, "create or update service failed", "inferName", inference.Name)
+	}
 	return ctrl.Result{}, err
 }
 
@@ -175,7 +181,7 @@ func mergeMetadata(new, old *metav1.ObjectMeta) {
 	new.Annotations = labels.Merge(old.Annotations, new.Annotations)
 }
 
-func GetOwnerReference(inference *aimanageriov1alpha1.Inference) []metav1.OwnerReference {
+func GetInferOwnerReference(inference *aimanageriov1alpha1.Inference) []metav1.OwnerReference {
 	isController := true
 	controllerRef := []metav1.OwnerReference{
 		{
@@ -190,8 +196,8 @@ func GetOwnerReference(inference *aimanageriov1alpha1.Inference) []metav1.OwnerR
 	return utils.MergeOwnerReferences(inference.GetOwnerReferences(), controllerRef)
 }
 
-func getDesiredWorkerDeployment(inference *aimanageriov1alpha1.Inference, matchLabels map[string]string) (workerDeployment *appsv1.Deployment) {
-	container := createContainer(inference)
+func (i *InferenceReconciler) getDesiredWorkerDeployment(inference *aimanageriov1alpha1.Inference, matchLabels map[string]string) (workerDeployment *appsv1.Deployment) {
+	container := i.createContainer(inference)
 	workerDeployment = &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Deployment",
@@ -225,12 +231,25 @@ func getDesiredWorkerDeployment(inference *aimanageriov1alpha1.Inference, matchL
 	return
 }
 
-func createContainer(inference *aimanageriov1alpha1.Inference) (container corev1.Container) {
+func (i *InferenceReconciler) getModelImage(inference *aimanageriov1alpha1.Inference) (modelImage string) {
+	if inference.Spec.Image != "" {
+		return inference.Spec.Image
+	}
+
+	modelName := strings.Replace(inference.Spec.Model, "/", "-", -1)
+	if strings.HasSuffix(i.Config.Registry, "/") {
+		return fmt.Sprintf("%s%s-%s:%s", i.Config.Registry, modelName, inference.Spec.Framework, aimanageriov1alpha1.DefaultModelImageTag)
+	}
+
+	return fmt.Sprintf("%s/%s-%s:%s", i.Config.Registry, modelName, inference.Spec.Framework, aimanageriov1alpha1.DefaultModelImageTag)
+}
+
+func (i *InferenceReconciler) createContainer(inference *aimanageriov1alpha1.Inference) (container corev1.Container) {
 	container = corev1.Container{
 		Name:            inference.Name,
-		Image:           inference.Spec.Image,
+		Image:           i.getModelImage(inference),
 		ImagePullPolicy: inference.Spec.ImagePullPolicy,
-		Ports:           createPrometheusPorts(),
+		Ports:           createInferServicePorts(inference),
 	}
 
 	container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
@@ -247,8 +266,18 @@ func createContainer(inference *aimanageriov1alpha1.Inference) (container corev1
 		AllowPrivilegeEscalation: pointer.Bool(false),
 		RunAsNonRoot:             pointer.Bool(true),
 	}
-	// TODO Hugging face Model container args
-	//container.Args = []string{"-v=" + verbosity}
+
+	container.Command = []string{
+		"python",
+		"-m",
+		"vllm.entrypoints.openai.api_server",
+		"--host",
+		"0.0.0.0",
+		"--port",
+		strconv.Itoa(int(aimanageriov1alpha1.InferContainerPort)),
+		"--model",
+		fmt.Sprintf("%s/%s", aimanageriov1alpha1.LocalModelDir, inference.Spec.Model),
+	}
 
 	container.ReadinessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
@@ -272,11 +301,11 @@ func createContainer(inference *aimanageriov1alpha1.Inference) (container corev1
 	return
 }
 
-func createPrometheusPorts() []corev1.ContainerPort {
+func createInferServicePorts(inference *aimanageriov1alpha1.Inference) []corev1.ContainerPort {
 	return []corev1.ContainerPort{
 		{
-			Name:          "infr-service",
-			ContainerPort: 8082,
+			Name:          inference.Spec.PortName,
+			ContainerPort: aimanageriov1alpha1.InferContainerPort,
 			Protocol:      "TCP",
 		},
 	}
@@ -298,12 +327,10 @@ func getDesiredService(inference *aimanageriov1alpha1.Inference, labels map[stri
 			Selector: labels,
 			Ports: []corev1.ServicePort{
 				{
-					Port: 8084,
-					TargetPort: intstr.IntOrString{
-						Type:   intstr.Int,
-						IntVal: 8084,
-					},
-					Protocol: corev1.ProtocolTCP,
+					Name:       inference.Spec.PortName,
+					Port:       inference.Spec.ServicePort,
+					TargetPort: intstr.FromString(inference.Spec.PortName),
+					Protocol:   corev1.ProtocolTCP,
 				},
 			},
 		},

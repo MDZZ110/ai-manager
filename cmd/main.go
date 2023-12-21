@@ -18,6 +18,7 @@ package main
 
 import (
 	"flag"
+	"github.com/MDZZ110/ai-manager/internal/config"
 	"k8s.io/klog/v2"
 	"os"
 
@@ -67,6 +68,12 @@ func main() {
 
 	ctrl.SetLogger(klog.NewKlogr())
 
+	managerConfig, err := config.TryLoadFromDisk()
+	if err != nil {
+		setupLog.Error(err, "load config failed")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
@@ -100,6 +107,7 @@ func main() {
 	if err = (&controller.InferenceReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Config: managerConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Inference")
 		os.Exit(1)
