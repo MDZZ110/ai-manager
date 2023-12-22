@@ -22,9 +22,10 @@ import (
 )
 
 const (
-	InferenceFinalizer                        = "finalizer.inference.ai.manager.io"
-	LabelModelName                            = "ai.manager.io/model-name"
-	LabelFramework                            = "ai.manager.io/framework"
+	InferenceFinalizer = "finalizer.inference.ai.manager.io"
+	LabelModelName     = "ai.manager.io/model-name"
+	LabelFramework     = "ai.manager.io/framework"
+
 	LabelApp                                  = "app"
 	LabelGPU                                  = "nvidia.com/gpu.present"
 	DeployedInferStatus  InferComponentStatus = "deployed"
@@ -32,6 +33,7 @@ const (
 	LocalModelDir                             = "/models"
 	InferContainerPort   int32                = 8000
 	DefaultModelImageTag string               = "rebase"
+	InferHashName        string               = "inference-hash"
 )
 
 type InferComponentStatus string

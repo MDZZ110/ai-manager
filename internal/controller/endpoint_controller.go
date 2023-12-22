@@ -50,6 +50,8 @@ type EndpointReconciler struct {
 //+kubebuilder:rbac:groups=ai.manager.io,resources=endpoints/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=ai.manager.io,resources=endpoints/finalizers,verbs=update
 //+kubebuilder:rbac:groups=ai.manager.io,resources=inferences,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -99,13 +101,26 @@ func (e *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	desiredDeployment := e.getDesiredWorkerDeployment(endpoint, matchLabels)
-	desiredDeployment.SetOwnerReferences(GetEndpointOwnerReference(endpoint))
-	err := e.CreateOrUpdateDeployment(ctx, desiredDeployment)
+	err := ctrl.SetControllerReference(endpoint, desiredDeployment, e.Scheme)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	err = e.CreateOrUpdateDeployment(ctx, desiredDeployment)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	desiredService := e.getDesiredService(endpoint, matchLabels)
+	desiredService.SetOwnerReferences(GetEndpointOwnerReference(endpoint))
+	err = e.CreateOrUpdateService(ctx, desiredService)
+	if err != nil {
+		logger.Error(err, "create or update chat web service failed", "endpointName", endpoint.Name)
+		return ctrl.Result{}, err
+	}
+
+	// TODO create or update Inference
+
+	return ctrl.Result{}, err
 }
 
 func (e *EndpointReconciler) CreateOrUpdateDeployment(ctx context.Context, desired *appsv1.Deployment) error {
@@ -239,24 +254,6 @@ func (e *EndpointReconciler) createContainer(endpoint *aimanageriov1alpha1.Endpo
 
 	container.Command = []string{}
 
-	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/healthz",
-				Port: intstr.IntOrString{
-					Type:   intstr.Int,
-					IntVal: 8443,
-				},
-				Scheme: corev1.URISchemeHTTPS,
-			},
-		},
-		InitialDelaySeconds: 2,
-		PeriodSeconds:       5,
-		FailureThreshold:    3,
-		SuccessThreshold:    1,
-		TimeoutSeconds:      1,
-	}
-
 	container.Resources = endpoint.Spec.WebSpec.Resources
 	container.Env = []corev1.EnvVar{
 		{
@@ -305,4 +302,27 @@ func (e *EndpointReconciler) getDesiredService(endpoint *aimanageriov1alpha1.End
 			},
 		},
 	}
+}
+
+func (e *EndpointReconciler) CreateOrUpdateService(ctx context.Context, desired *corev1.Service) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var current = &corev1.Service{}
+		err := e.Get(ctx, client.ObjectKeyFromObject(desired), current)
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				return err
+			}
+			return e.Create(ctx, desired)
+		}
+
+		// Apply immutable fields from the existing service.
+		desired.Spec.IPFamilies = current.Spec.IPFamilies
+		desired.Spec.IPFamilyPolicy = current.Spec.IPFamilyPolicy
+		desired.Spec.ClusterIP = current.Spec.ClusterIP
+		desired.Spec.ClusterIPs = current.Spec.ClusterIPs
+
+		mergeMetadata(&desired.ObjectMeta, &current.ObjectMeta)
+
+		return e.Update(ctx, desired)
+	})
 }

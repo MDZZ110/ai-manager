@@ -23,6 +23,7 @@ import (
 	"github.com/MDZZ110/ai-manager/internal/config"
 	"github.com/MDZZ110/ai-manager/internal/utils"
 	"github.com/go-logr/logr"
+	"github.com/mitchellh/hashstructure"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -51,9 +52,11 @@ type InferenceReconciler struct {
 //+kubebuilder:rbac:groups=ai.manager.io,resources=inferences/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=ai.manager.io,resources=inferences/finalizers,verbs=update
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 
 func (i *InferenceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
 	inference := &aimanageriov1alpha1.Inference{}
 
 	if err := i.Get(ctx, req.NamespacedName, inference); err != nil {
@@ -91,15 +94,40 @@ func (i *InferenceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		aimanageriov1alpha1.LabelFramework: inference.Spec.Framework,
 	}
 
-	desiredDeployment := i.getDesiredWorkerDeployment(inference, matchLabels)
-	desiredDeployment.SetOwnerReferences(GetInferOwnerReference(inference))
-	err := i.CreateOrUpdateDeployment(ctx, desiredDeployment)
+	hashInt64, err := hashstructure.Hash(struct {
+		Name            string
+		InferGeneration int64
+		Config          config.Config
+		InferSpec       aimanageriov1alpha1.InferenceSpec
+	}{
+		Name:            inference.Name,
+		InferGeneration: inference.Generation,
+		Config:          *i.Config,
+		InferSpec:       inference.Spec,
+	}, nil)
+	if err != nil {
+		logger.Error(err, "failed to calculate combined inference hash", "inferName", inference.Name)
+		return ctrl.Result{}, err
+	}
+
+	hash := fmt.Sprintf("%d", hashInt64)
+	desiredDeployment := i.getDesiredWorkerDeployment(inference, matchLabels, hash)
+	err = ctrl.SetControllerReference(inference, desiredDeployment, i.Scheme)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	err = i.CreateOrUpdateDeployment(ctx, desiredDeployment, hash)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	desiredService := getDesiredService(inference, matchLabels)
-	desiredService.SetOwnerReferences(GetInferOwnerReference(inference))
+	err = ctrl.SetControllerReference(inference, desiredService, i.Scheme)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	err = i.CreateOrUpdateService(ctx, desiredService)
 	if err != nil {
 		logger.Error(err, "create or update service failed", "inferName", inference.Name)
@@ -107,7 +135,7 @@ func (i *InferenceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return ctrl.Result{}, err
 }
 
-func (i *InferenceReconciler) CreateOrUpdateDeployment(ctx context.Context, desired *appsv1.Deployment) error {
+func (i *InferenceReconciler) CreateOrUpdateDeployment(ctx context.Context, desired *appsv1.Deployment, combinedHash string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var current = &appsv1.Deployment{}
 		err := i.Get(ctx, client.ObjectKeyFromObject(desired), current)
@@ -116,6 +144,17 @@ func (i *InferenceReconciler) CreateOrUpdateDeployment(ctx context.Context, desi
 				return err
 			}
 			return i.Create(ctx, desired)
+		}
+
+		if current.ObjectMeta.Annotations != nil {
+			oldHash, ok := current.ObjectMeta.Annotations[aimanageriov1alpha1.InferHashName]
+			if ok && oldHash == combinedHash {
+				log.FromContext(ctx).V(0).Info("combinedHash not updated, skipping updating inference deployment",
+					"oldHash", oldHash,
+					"newHash", combinedHash,
+					"deployName", desired.Name)
+				return nil
+			}
 		}
 
 		mergeMetadata(&desired.ObjectMeta, &current.ObjectMeta)
@@ -181,23 +220,30 @@ func mergeMetadata(new, old *metav1.ObjectMeta) {
 	new.Annotations = labels.Merge(old.Annotations, new.Annotations)
 }
 
-func GetInferOwnerReference(inference *aimanageriov1alpha1.Inference) []metav1.OwnerReference {
-	isController := true
-	controllerRef := []metav1.OwnerReference{
-		{
-			APIVersion: inference.APIVersion,
-			Kind:       inference.Kind,
-			Name:       inference.Name,
-			UID:        inference.UID,
-			Controller: &isController,
-		},
+func (i *InferenceReconciler) getPodMetadata(inference *aimanageriov1alpha1.Inference, matchLabels map[string]string) (map[string]string, map[string]string) {
+	podAnnotations := make(map[string]string)
+	podLabels := make(map[string]string)
+	if inference.Spec.PodMetadata != nil {
+		for k, v := range inference.Spec.PodMetadata.Labels {
+			podLabels[k] = v
+		}
+
+		for k, v := range matchLabels {
+			podLabels[k] = v
+		}
+
+		for k, v := range inference.Spec.PodMetadata.Annotations {
+			podAnnotations[k] = v
+		}
 	}
 
-	return utils.MergeOwnerReferences(inference.GetOwnerReferences(), controllerRef)
+	return podAnnotations, podLabels
 }
 
-func (i *InferenceReconciler) getDesiredWorkerDeployment(inference *aimanageriov1alpha1.Inference, matchLabels map[string]string) (workerDeployment *appsv1.Deployment) {
+func (i *InferenceReconciler) getDesiredWorkerDeployment(inference *aimanageriov1alpha1.Inference, matchLabels map[string]string, combinedHash string) (workerDeployment *appsv1.Deployment) {
 	container := i.createContainer(inference)
+	podAnnotations, podLabels := i.getPodMetadata(inference, matchLabels)
+
 	workerDeployment = &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Deployment",
@@ -207,6 +253,9 @@ func (i *InferenceReconciler) getDesiredWorkerDeployment(inference *aimanageriov
 			Name:      fmt.Sprintf("%s-%s-%s", inference.Name, inference.Spec.Model, inference.Spec.Framework),
 			Namespace: inference.Namespace,
 			Labels:    matchLabels,
+			Annotations: map[string]string{
+				aimanageriov1alpha1.InferHashName: combinedHash,
+			},
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &inference.Spec.Replicas,
@@ -215,7 +264,8 @@ func (i *InferenceReconciler) getDesiredWorkerDeployment(inference *aimanageriov
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: matchLabels,
+					Labels:      podLabels,
+					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
 					SecurityContext: &corev1.PodSecurityContext{},
@@ -279,24 +329,6 @@ func (i *InferenceReconciler) createContainer(inference *aimanageriov1alpha1.Inf
 		fmt.Sprintf("%s/%s", aimanageriov1alpha1.LocalModelDir, inference.Spec.Model),
 	}
 
-	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/healthz",
-				Port: intstr.IntOrString{
-					Type:   intstr.Int,
-					IntVal: 8443,
-				},
-				Scheme: corev1.URISchemeHTTPS,
-			},
-		},
-		InitialDelaySeconds: 2,
-		PeriodSeconds:       5,
-		FailureThreshold:    3,
-		SuccessThreshold:    1,
-		TimeoutSeconds:      1,
-	}
-
 	container.Resources = inference.Spec.Resources
 	return
 }
@@ -306,7 +338,7 @@ func createInferServicePorts(inference *aimanageriov1alpha1.Inference) []corev1.
 		{
 			Name:          inference.Spec.PortName,
 			ContainerPort: aimanageriov1alpha1.InferContainerPort,
-			Protocol:      "TCP",
+			Protocol:      corev1.ProtocolTCP,
 		},
 	}
 }
