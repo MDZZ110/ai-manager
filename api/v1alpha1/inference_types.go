@@ -22,10 +22,9 @@ import (
 )
 
 const (
-	InferenceFinalizer = "finalizer.inference.ai.manager.io"
-	LabelModelName     = "ai.manager.io/model-name"
-	LabelFramework     = "ai.manager.io/framework"
-
+	InferenceFinalizer                        = "finalizer.inference.ai.manager.io"
+	LabelModelName                            = "ai.manager.io/model-name"
+	LabelFramework                            = "ai.manager.io/framework"
 	LabelApp                                  = "app"
 	LabelGPU                                  = "nvidia.com/gpu.present"
 	DeployedInferStatus  InferComponentStatus = "deployed"
@@ -34,6 +33,7 @@ const (
 	InferContainerPort   int32                = 8000
 	DefaultModelImageTag string               = "rebase"
 	InferHashName        string               = "inference-hash"
+	InferDefaultPortName string               = "inference"
 )
 
 type InferComponentStatus string
@@ -54,8 +54,6 @@ type InferenceSpec struct {
 
 	ImagePullSecrets []v1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
-	// Default: "web"
-	// +kubebuilder:default:="web"
 	PortName string `json:"portName,omitempty"`
 
 	ServicePort int32 `json:"servicePort,omitempty"`

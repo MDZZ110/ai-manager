@@ -63,6 +63,7 @@ func (i *InferenceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	inference = i.SetDefaultValue(inference)
 	if inference.ObjectMeta.DeletionTimestamp.IsZero() {
 		if !utils.ContainsFinalizer(inference.GetFinalizers(), aimanageriov1alpha1.InferenceFinalizer) {
 			i.SetFinalizers(inference)
@@ -133,6 +134,20 @@ func (i *InferenceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		logger.Error(err, "create or update service failed", "inferName", inference.Name)
 	}
 	return ctrl.Result{}, err
+}
+
+func (i *InferenceReconciler) SetDefaultValue(currInference *aimanageriov1alpha1.Inference) *aimanageriov1alpha1.Inference {
+	inference := currInference.DeepCopy()
+	if inference.Spec.PortName == "" {
+		inference.Spec.PortName = aimanageriov1alpha1.InferDefaultPortName
+	}
+
+	if len(inference.Spec.ImagePullSecrets) == 0 {
+		credSecretRef := corev1.LocalObjectReference{i.Config.CredSecretName}
+		inference.Spec.ImagePullSecrets = append(inference.Spec.ImagePullSecrets, credSecretRef)
+	}
+
+	return inference
 }
 
 func (i *InferenceReconciler) CreateOrUpdateDeployment(ctx context.Context, desired *appsv1.Deployment, combinedHash string) error {

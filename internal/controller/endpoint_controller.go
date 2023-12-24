@@ -22,6 +22,7 @@ import (
 	"github.com/MDZZ110/ai-manager/internal/config"
 	"github.com/MDZZ110/ai-manager/internal/utils"
 	"github.com/go-logr/logr"
+	"github.com/mitchellh/hashstructure"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -70,6 +71,7 @@ func (e *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	endpoint = e.SetDefaultValue(endpoint)
 	if endpoint.ObjectMeta.DeletionTimestamp.IsZero() {
 		if !utils.ContainsFinalizer(endpoint.GetFinalizers(), aimanageriov1alpha1.EndpointFinalizer) {
 			e.SetFinalizers(endpoint)
@@ -100,12 +102,31 @@ func (e *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		aimanageriov1alpha1.LabelChatWebUI: "true",
 	}
 
-	desiredDeployment := e.getDesiredWorkerDeployment(endpoint, matchLabels)
-	err := ctrl.SetControllerReference(endpoint, desiredDeployment, e.Scheme)
+	hashInt64, err := hashstructure.Hash(struct {
+		Name               string
+		EndpointGeneration int64
+		Config             config.Config
+		InferSpec          aimanageriov1alpha1.InferenceSpec
+		WebSpec            aimanageriov1alpha1.EndpointWebSpec
+	}{
+		Name:               endpoint.Name,
+		EndpointGeneration: endpoint.Generation,
+		Config:             *e.Config,
+		InferSpec:          endpoint.Spec.InferSpec,
+		WebSpec:            endpoint.Spec.WebSpec,
+	}, nil)
+	if err != nil {
+		logger.Error(err, "failed to calculate combined endpoint hash", "endpointName", endpoint.Name)
+		return ctrl.Result{}, err
+	}
+
+	hash := fmt.Sprintf("%d", hashInt64)
+	desiredDeployment := e.getDesiredWorkerDeployment(endpoint, matchLabels, hash)
+	err = ctrl.SetControllerReference(endpoint, desiredDeployment, e.Scheme)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	err = e.CreateOrUpdateDeployment(ctx, desiredDeployment)
+	err = e.CreateOrUpdateDeployment(ctx, desiredDeployment, hash)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -118,12 +139,38 @@ func (e *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
-	// TODO create or update Inference
+	desiredInference := e.getDesiredInference(endpoint)
+	err = e.CreateOrUpdateInference(ctx, desiredInference)
+	if err != nil {
+		logger.Error(err, "create or update inference failed", "inferName", endpoint.Name)
+	}
 
 	return ctrl.Result{}, err
 }
 
-func (e *EndpointReconciler) CreateOrUpdateDeployment(ctx context.Context, desired *appsv1.Deployment) error {
+func (e *EndpointReconciler) SetDefaultValue(currEndpoint *aimanageriov1alpha1.Endpoint) *aimanageriov1alpha1.Endpoint {
+	endpoint := currEndpoint.DeepCopy()
+	if endpoint.Spec.InferSpec.PortName == "" {
+		endpoint.Spec.InferSpec.PortName = aimanageriov1alpha1.InferDefaultPortName
+	}
+
+	if endpoint.Spec.WebSpec.PortName == "" {
+		endpoint.Spec.WebSpec.PortName = aimanageriov1alpha1.WebDefaultPortName
+	}
+
+	credSecretRef := corev1.LocalObjectReference{e.Config.CredSecretName}
+	if len(endpoint.Spec.InferSpec.ImagePullSecrets) == 0 {
+		endpoint.Spec.InferSpec.ImagePullSecrets = append(endpoint.Spec.InferSpec.ImagePullSecrets, credSecretRef)
+	}
+
+	if len(endpoint.Spec.WebSpec.ImagePullSecrets) == 0 {
+		endpoint.Spec.WebSpec.ImagePullSecrets = append(endpoint.Spec.WebSpec.ImagePullSecrets, credSecretRef)
+	}
+
+	return endpoint
+}
+
+func (e *EndpointReconciler) CreateOrUpdateDeployment(ctx context.Context, desired *appsv1.Deployment, combinedHash string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var current = &appsv1.Deployment{}
 		err := e.Get(ctx, client.ObjectKeyFromObject(desired), current)
@@ -132,6 +179,17 @@ func (e *EndpointReconciler) CreateOrUpdateDeployment(ctx context.Context, desir
 				return err
 			}
 			return e.Create(ctx, desired)
+		}
+
+		if current.ObjectMeta.Annotations != nil {
+			oldHash, ok := current.ObjectMeta.Annotations[aimanageriov1alpha1.WebHashName]
+			if ok && oldHash == combinedHash {
+				log.FromContext(ctx).V(0).Info("combinedHash not updated, skipping updating chat web deployment",
+					"oldHash", oldHash,
+					"newHash", combinedHash,
+					"deployName", desired.Name)
+				return nil
+			}
 		}
 
 		mergeMetadata(&desired.ObjectMeta, &current.ObjectMeta)
@@ -182,8 +240,44 @@ func (e *EndpointReconciler) ReleaseResources(ctx context.Context, nn types.Name
 	return
 }
 
-func (e *EndpointReconciler) getDesiredWorkerDeployment(endpoint *aimanageriov1alpha1.Endpoint, matchLabels map[string]string) (workerDeployment *appsv1.Deployment) {
+func (e *EndpointReconciler) getPodMetadata(endpoint *aimanageriov1alpha1.Endpoint, matchLabels map[string]string) (map[string]string, map[string]string) {
+	podAnnotations := make(map[string]string)
+	podLabels := make(map[string]string)
+	if endpoint.Spec.WebSpec.PodMetadata != nil {
+		for k, v := range endpoint.Spec.WebSpec.PodMetadata.Labels {
+			podLabels[k] = v
+		}
+
+		for k, v := range matchLabels {
+			podLabels[k] = v
+		}
+
+		for k, v := range endpoint.Spec.WebSpec.PodMetadata.Annotations {
+			podAnnotations[k] = v
+		}
+	}
+
+	return podAnnotations, podLabels
+}
+
+func (e *EndpointReconciler) getDesiredInference(endpoint *aimanageriov1alpha1.Endpoint) *aimanageriov1alpha1.Inference {
+	desiredInference := &aimanageriov1alpha1.Inference{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        endpoint.Name,
+			Namespace:   endpoint.Namespace,
+			Labels:      endpoint.Labels,
+			Annotations: endpoint.Annotations,
+		},
+		Spec: endpoint.Spec.InferSpec,
+	}
+
+	return desiredInference
+}
+
+func (e *EndpointReconciler) getDesiredWorkerDeployment(endpoint *aimanageriov1alpha1.Endpoint, matchLabels map[string]string, combinedHash string) (workerDeployment *appsv1.Deployment) {
 	container := e.createContainer(endpoint)
+	podAnnotations, podLabels := e.getPodMetadata(endpoint, matchLabels)
+
 	workerDeployment = &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Deployment",
@@ -193,6 +287,9 @@ func (e *EndpointReconciler) getDesiredWorkerDeployment(endpoint *aimanageriov1a
 			Name:      fmt.Sprintf("%s-%s", aimanageriov1alpha1.ChatWebName, endpoint.Name),
 			Namespace: endpoint.Namespace,
 			Labels:    matchLabels,
+			Annotations: map[string]string{
+				aimanageriov1alpha1.WebHashName: combinedHash,
+			},
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &endpoint.Spec.WebSpec.Replicas,
@@ -201,7 +298,8 @@ func (e *EndpointReconciler) getDesiredWorkerDeployment(endpoint *aimanageriov1a
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: matchLabels,
+					Labels:      podLabels,
+					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
 					SecurityContext: &corev1.PodSecurityContext{},
@@ -324,5 +422,21 @@ func (e *EndpointReconciler) CreateOrUpdateService(ctx context.Context, desired 
 		mergeMetadata(&desired.ObjectMeta, &current.ObjectMeta)
 
 		return e.Update(ctx, desired)
+	})
+}
+
+func (e *EndpointReconciler) CreateOrUpdateInference(ctx context.Context, desiredInference *aimanageriov1alpha1.Inference) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var currInference = &aimanageriov1alpha1.Inference{}
+		err := e.Get(ctx, client.ObjectKeyFromObject(desiredInference), currInference)
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				return err
+			}
+			return e.Create(ctx, desiredInference)
+		}
+
+		mergeMetadata(&desiredInference.ObjectMeta, &currInference.ObjectMeta)
+		return e.Update(ctx, desiredInference)
 	})
 }

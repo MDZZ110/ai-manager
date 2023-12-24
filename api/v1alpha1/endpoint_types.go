@@ -30,14 +30,16 @@ const (
 	DefaultChatWebImage                            = "yidadaa/chatgpt-next-web"
 	DefaultChatWebImageTag                         = "latest"
 	WebContainerPort       int32                   = 3000
+	WebDefaultPortName                             = "chat-web"
+	WebHashName                                    = "chat-web-hash"
 )
 
 type EndpointComponentStatus string
 
 // EndpointSpec defines the desired state of Endpoint
 type EndpointSpec struct {
-	InferSpec *InferenceSpec   `json:"inferSpec,omitempty"`
-	WebSpec   *EndpointWebSpec `json:"webSpec,omitempty"`
+	InferSpec InferenceSpec   `json:"inferSpec,omitempty"`
+	WebSpec   EndpointWebSpec `json:"webSpec,omitempty"`
 }
 
 // EndpointStatus defines the observed state of Endpoint
