@@ -922,8 +922,6 @@ spec:
                     type: string
                 type: object
               portName:
-                default: web
-                description: 'Default: "web"'
                 type: string
               resources:
                 description: Defines the resources requests
@@ -973,6 +971,9 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                     type: object
                 type: object
+              servicePort:
+                format: int32
+                type: integer
               tolerations:
                 description: Defines the Pods' tolerations if specified.
                 items:
